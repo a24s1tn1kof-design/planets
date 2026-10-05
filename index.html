@@ -3,17 +3,471 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Planet Explorer</title>
-<link rel="stylesheet" href="style.css">
+<title>Planet Explorer — First Person</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #000;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    touch-action: none; user-select: none;
+  }
+  #game { display: block; width: 100%; height: 100%; }
+  #ui { position: fixed; inset: 0; pointer-events: none; }
+  #generateBtn {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    padding: 12px 24px;
+    background: linear-gradient(135deg, #4a90e2, #7b4ae2);
+    color: #fff; border: none; border-radius: 30px;
+    font-size: 15px; font-weight: 600; cursor: pointer; pointer-events: auto;
+    box-shadow: 0 6px 20px rgba(120, 80, 255, 0.5);
+    transition: transform 0.15s;
+  }
+  #generateBtn:active { transform: translateX(-50%) scale(0.95); }
+  #info {
+    position: absolute; top: 70px; left: 50%; transform: translateX(-50%);
+    color: #a0c8ff; font-size: 13px; text-align: center;
+    text-shadow: 0 2px 8px #000; padding: 8px 16px;
+    background: rgba(0,0,0,0.4); border-radius: 12px;
+    backdrop-filter: blur(6px); max-width: 90vw;
+  }
+  #crosshair {
+    position: absolute; top: 50%; left: 50%;
+    width: 8px; height: 8px; margin: -4px 0 0 -4px;
+    border-radius: 50%; background: rgba(255,255,255,0.5);
+    box-shadow: 0 0 6px rgba(255,255,255,0.4);
+  }
+</style>
 </head>
 <body>
 <canvas id="game"></canvas>
-
 <div id="ui">
   <button id="generateBtn">🌌 Сгенерировать планету</button>
   <div id="info"></div>
+  <div id="crosshair"></div>
 </div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const genBtn = document.getElementById('generateBtn');
+const infoEl = document.getElementById('info');
 
-<script src="script.js"></script>
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth * devicePixelRatio;
+  H = canvas.height = window.innerHeight * devicePixelRatio;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- Состояние ----------
+const state = {
+  planet: null,
+  // Камера-голова
+  yaw: 0,         // -PI..PI
+  pitch: 0,       // -0.6..0.6 (взгляд вниз/вверх)
+  // Позиция игрока в мире (плоскость XZ, высота Y)
+  pos: { x: 0, y: 25, z: 0 },
+  vel: { x: 0, z: 0 },
+  joyActive: false,
+  joyStart: { x: 0, y: 0 },
+  joyVec: { x: 0, y: 0 },
+  lookActive: false,
+  lookStart: { x: 0, y: 0 },
+  lookStartYaw: 0,
+  lookStartPitch: 0,
+  time: 0,
+};
+
+// ---------- Генерация планеты ----------
+function generatePlanet() {
+  const palettes = [
+    // Земля-подобная
+    { name: 'Землеподобная', sky: [120, 180, 240], ground: [80, 120, 60],
+      rock: [110, 100, 90], water: [40, 90, 150], fog: [180, 200, 230],
+      hasWater: true, hasLife: Math.random() < 0.4 },
+    // Пустынная (Марс)
+    { name: 'Пустынная', sky: [220, 160, 110], ground: [160, 100, 60],
+      rock: [140, 80, 50], water: [0,0,0], fog: [230, 180, 130],
+      hasWater: false, hasLife: Math.random() < 0.05 },
+    // Ледяная
+    { name: 'Ледяная', sky: [200, 220, 245], ground: [200, 215, 235],
+      rock: [150, 170, 200], water: [140, 180, 220], fog: [220, 235, 250],
+      hasWater: true, hasLife: Math.random() < 0.03 },
+    // Вулканическая
+    { name: 'Вулканическая', sky: [80, 30, 20], ground: [60, 30, 25],
+      rock: [50, 25, 20], water: [200, 60, 20], fog: [120, 40, 20],
+      hasWater: false, hasLife: Math.random() < 0.02, lava: true },
+    // Токсичная
+    { name: 'Токсичная', sky: [140, 170, 60], ground: [90, 110, 40],
+      rock: [70, 90, 35], water: [120, 180, 40], fog: [160, 190, 80],
+      hasWater: true, hasLife: Math.random() < 0.04 },
+    // Океаническая (вода почти везде)
+    { name: 'Океаническая', sky: [140, 190, 240], ground: [80, 130, 80],
+      rock: [100, 110, 100], water: [30, 80, 150], fog: [170, 200, 230],
+      hasWater: true, hasLife: Math.random() < 0.5 },
+  ];
+  const p = palettes[Math.floor(Math.random() * palettes.length)];
+
+  // Процедурный рельеф через синус-сумму (простой шум)
+  const seed = Math.random() * 1000;
+  const noise = (x, z) => {
+    return (
+      Math.sin(x * 0.03 + seed) * Math.cos(z * 0.027 + seed * 1.3) * 12 +
+      Math.sin(x * 0.07 + seed * 2.1) * Math.cos(z * 0.06 + seed * 0.7) * 6 +
+      Math.sin(x * 0.15 + seed * 3.3) * Math.cos(z * 0.13 + seed * 2.7) * 3
+    );
+  };
+
+  // "Вода" — низкие уровни рельефа
+  const waterLevel = p.hasWater ? (p.name === 'Океаническая' ? 8 : 0) : -999;
+
+  state.planet = { palette: p, noise, waterLevel, seed };
+  state.pos = { x: 0, y: 30, z: 0 };
+  state.vel = { x: 0, z: 0 };
+  state.yaw = 0;
+  state.pitch = 0.05;
+
+  updateInfo();
+}
+
+function updateInfo() {
+  if (!state.planet) return;
+  const p = state.planet.palette;
+  let txt = `🪐 ${p.name}`;
+  if (p.hasWater) txt += ` · 💧 вода`;
+  if (p.hasLife) txt += ` · 🌱 жизнь`;
+  infoEl.textContent = txt;
+}
+
+// ---------- Рендер от первого лица ----------
+function drawSkyAndGround() {
+  const p = state.planet.palette;
+  const horizonY = H * 0.5 - state.pitch * H * 0.6;
+
+  // Небо — градиент от горизонта вверх
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+  skyGrad.addColorStop(0, `rgb(${p.sky[0]*0.5|0},${p.sky[1]*0.5|0},${p.sky[2]*0.7|0})`);
+  skyGrad.addColorStop(1, `rgb(${p.sky.join(',')})`);
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, Math.max(0, horizonY));
+
+  // Дымка у горизонта
+  const fogGrad = ctx.createLinearGradient(0, horizonY - H*0.2, 0, horizonY + H*0.1);
+  fogGrad.addColorStop(0, `rgba(${p.fog.join(',')},0)`);
+  fogGrad.addColorStop(0.6, `rgba(${p.fog.join(',')},0.7)`);
+  fogGrad.addColorStop(1, `rgba(${p.fog.join(',')},0.3)`);
+  ctx.fillStyle = fogGrad;
+  ctx.fillRect(0, horizonY - H*0.2, W, H*0.3);
+
+  // Земля — тоже градиент
+  const groundGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+  groundGrad.addColorStop(0, `rgb(${p.fog.join(',')})`);
+  groundGrad.addColorStop(1, `rgb(${p.ground.join(',')})`);
+  ctx.fillStyle = groundGrad;
+  ctx.fillRect(0, Math.max(0, horizonY), W, H - Math.max(0, horizonY));
+}
+
+// Псевдо-3D рельеф: рисуем полосы "столбиков" по горизонту
+function drawTerrain() {
+  const p = state.planet.palette;
+  const horizonY = H * 0.5 - state.pitch * H * 0.6;
+  const cosYaw = Math.cos(state.yaw);
+  const sinYaw = Math.sin(state.yaw);
+
+  // Рисуем несколько слоёв гор сзади-вперёд (от дальних к ближним)
+  const layers = 6;
+  for (let layer = layers - 1; layer >= 0; layer--) {
+    const distFactor = 1 + layer * 1.5; // дальше = больше
+    const alpha = 0.35 + (layers - layer) / layers * 0.6;
+    const yBase = horizonY + layer * (H * 0.02);
+
+    ctx.beginPath();
+    ctx.moveTo(0, yBase);
+
+    const step = 8 * devicePixelRatio;
+    for (let sx = 0; sx <= W; sx += step) {
+      // Мировые координаты вдоль луча взгляда
+      const nx = (sx / W - 0.5) * 2; // -1..1
+      const worldX = state.pos.x + (nx * 100 + cosYaw * 40) * distFactor;
+      const worldZ = state.pos.z + (nx * 100 + sinYaw * 40) * distFactor;
+
+      // Высота рельефа в этой точке
+      let h = state.planet.noise(worldX, worldZ);
+      // Вода
+      if (state.planet.waterLevel > -100 && h < state.planet.waterLevel) {
+        h = state.planet.waterLevel;
+      }
+
+      // Смещение по вертикали: чем дальше, тем меньше амплитуда
+      const yOff = -h * (H / 100) / distFactor;
+      ctx.lineTo(sx, yBase + yOff);
+    }
+    ctx.lineTo(W, yBase + H);
+    ctx.lineTo(0, yBase + H);
+    ctx.closePath();
+
+    // Цвет слоя: чем дальше, тем ближе к дымке
+    const t = layer / layers;
+    const fogBlend = t * 0.7;
+    const r = Math.round(p.ground[0] * (1-fogBlend) + p.fog[0] * fogBlend);
+    const g = Math.round(p.ground[1] * (1-fogBlend) + p.fog[1] * fogBlend);
+    const b = Math.round(p.ground[2] * (1-fogBlend) + p.fog[2] * fogBlend);
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.fill();
+  }
+
+  // Вода — заливка ниже waterLevel
+  if (state.planet.waterLevel > -100) {
+    // рисуем горизонтальную "гладь" на уровне воды
+    const wy = horizonY + 4 * devicePixelRatio;
+    const wGrad = ctx.createLinearGradient(0, wy, 0, H);
+    wGrad.addColorStop(0, `rgba(${p.water.join(',')},0.9)`);
+    wGrad.addColorStop(1, `rgba(${p.water.join(',')},0.4)`);
+    ctx.fillStyle = wGrad;
+    ctx.fillRect(0, wy, W, H - wy);
+  }
+
+  // Точки жизни (деревья/растения) — редкие
+  if (p.hasLife) {
+    const rng = mulberry32(Math.floor(state.planet.seed * 100000));
+    for (let i = 0; i < 120; i++) {
+      const wx = (rng() - 0.5) * 400;
+      const wz = (rng() - 0.5) * 400;
+      const h = state.planet.noise(wx, wz);
+      if (state.planet.waterLevel > -100 && h < state.planet.waterLevel + 2) continue;
+
+      // проекция на экран относительно игрока
+      const rx = wx - state.pos.x;
+      const rz = wz - state.pos.z;
+      const camX = rx * cosYaw + rz * sinYaw;
+      const camZ = -rx * sinYaw + rz * cosYaw;
+      if (camZ < 5) continue; // за спиной или слишком близко
+
+      const fov = 400;
+      const sx = W/2 + (camX / camZ) * fov * devicePixelRatio;
+      const sz = H/2 + ((state.pos.y - h) / camZ) * fov * devicePixelRatio + state.pitch * H * 0.6;
+      if (sx < -20 || sx > W+20 || sz > H || sz < horizonY) continue;
+
+      const size = Math.max(2, 200 / camZ) * devicePixelRatio;
+      ctx.fillStyle = `rgb(${40 + rng()*30|0}, ${100 + rng()*60|0}, ${40 + rng()*30|0})`;
+      ctx.beginPath();
+      ctx.arc(sx, sz, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Лава-свечение
+  if (p.lava) {
+    const rng = mulberry32(Math.floor(state.planet.seed * 50000));
+    for (let i = 0; i < 30; i++) {
+      const wx = (rng() - 0.5) * 300;
+      const wz = (rng() - 0.5) * 300;
+      const rx = wx - state.pos.x;
+      const rz = wz - state.pos.z;
+      const camX = rx * cosYaw + rz * sinYaw;
+      const camZ = -rx * sinYaw + rz * cosYaw;
+      if (camZ < 5) continue;
+      const fov = 400;
+      const sx = W/2 + (camX / camZ) * fov * devicePixelRatio;
+      const sz = H/2 + ((state.pos.y - 0) / camZ) * fov * devicePixelRatio + state.pitch * H * 0.6;
+      if (sx < -20 || sx > W+20 || sz > H) continue;
+      const size = Math.max(3, 300 / camZ) * devicePixelRatio;
+      const grd = ctx.createRadialGradient(sx, sz, 0, sx, sz, size*2);
+      grd.addColorStop(0, 'rgba(255,120,40,0.9)');
+      grd.addColorStop(1, 'rgba(255,60,0,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(sx, sz, size*2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// маленький PRNG для стабильного рендера
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- Главный цикл ----------
+let lastT = 0;
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
+  lastT = t;
+  state.time = t / 1000;
+
+  // Движение
+  if (state.joyActive) {
+    const speed = 30;
+    state.vel.x = state.joyVec.x * speed;
+    state.vel.z = -state.joyVec.y * speed;
+  } else {
+    state.vel.x *= 0.9;
+    state.vel.z *= 0.9;
+  }
+
+  // Двигаемся относительно направления взгляда
+  const cosY = Math.cos(state.yaw);
+  const sinY = Math.sin(state.yaw);
+  const mvX = state.vel.x * cosY + state.vel.z * sinY;
+  const mvZ = -state.vel.x * sinY + state.vel.z * cosY;
+  state.pos.x += mvX * dt;
+  state.pos.z += mvZ * dt;
+
+  // Авто-высота: держимся на ~25 над рельефом
+  const groundH = state.planet.noise(state.pos.x, state.pos.z);
+  state.pos.y += ((groundH + 25) - state.pos.y) * dt * 2;
+
+  // ---------- Отрисовка ----------
+  drawSkyAndGround();
+  drawTerrain();
+
+  // Виньетка
+  const vg = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.3, W/2, H/2, Math.max(W,H)*0.7);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Джойстик
+  if (state.joyActive) {
+    const dx = state.joyStart.x * devicePixelRatio;
+    const dy = state.joyStart.y * devicePixelRatio;
+    const rOuter = 60 * devicePixelRatio;
+    const rInner = 24 * devicePixelRatio;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 3 * devicePixelRatio;
+    ctx.beginPath();
+    ctx.arc(dx, dy, rOuter, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(120,180,255,0.6)';
+    ctx.beginPath();
+    ctx.arc(dx + state.joyVec.x * rOuter * 0.7, dy + state.joyVec.y * rOuter * 0.7, rInner, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ---------- Управление ----------
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    if (x < window.innerWidth * 0.5 && y > window.innerHeight * 0.5 && !state.joyActive) {
+      state.joyActive = true;
+      state.joyStart.x = x; state.joyStart.y = y;
+      state.joyVec.x = 0; state.joyVec.y = 0;
+    } else if (x > window.innerWidth * 0.5 && !state.lookActive) {
+      state.lookActive = true;
+      state.lookStart.x = x; state.lookStart.y = y;
+      state.lookStartYaw = state.yaw;
+      state.lookStartPitch = state.pitch;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    if (state.joyActive) {
+      const dx = x - state.joyStart.x;
+      const dy = y - state.joyStart.y;
+      const maxD = 60;
+      const d = Math.hypot(dx, dy);
+      const k = d > maxD ? maxD / d : 1;
+      state.joyVec.x = (dx * k) / maxD;
+      state.joyVec.y = (dy * k) / maxD;
+    }
+    if (state.lookActive) {
+      const dx = x - state.lookStart.x;
+      const dy = y - state.lookStart.y;
+      state.yaw = state.lookStartYaw - dx * 0.005;
+      state.pitch = Math.max(-0.5, Math.min(0.5, state.lookStartPitch - dy * 0.003));
+    }
+  }
+}, { passive: false });
+
+function endTouch(e) {
+  for (const t of e.changedTouches) {
+    if (state.joyActive && t.clientX < window.innerWidth * 0.5 && t.clientY > window.innerHeight * 0.5) {
+      state.joyActive = false;
+      state.joyVec.x = 0; state.joyVec.y = 0;
+    }
+    if (state.lookActive && t.clientX > window.innerWidth * 0.5) {
+      state.lookActive = false;
+    }
+  }
+}
+canvas.addEventListener('touchend', endTouch, { passive: false });
+canvas.addEventListener('touchcancel', endTouch, { passive: false });
+
+// Мышь для десктопа
+let mouseDown = false, mouseBtn = 0;
+canvas.addEventListener('mousedown', (e) => {
+  mouseDown = true; mouseBtn = e.button;
+  const x = e.clientX, y = e.clientY;
+  if (e.button === 0) {
+    // левая кнопка — смотрим
+    state.lookActive = true;
+    state.lookStart.x = x; state.lookStart.y = y;
+    state.lookStartYaw = state.yaw; state.lookStartPitch = state.pitch;
+  } else if (e.button === 2) {
+    // правая — джойстик
+    state.joyActive = true;
+    state.joyStart.x = x; state.joyStart.y = y;
+  }
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (!mouseDown) return;
+  const x = e.clientX, y = e.clientY;
+  if (state.joyActive) {
+    const dx = x - state.joyStart.x, dy = y - state.joyStart.y;
+    const maxD = 60;
+    const d = Math.hypot(dx, dy);
+    const k = d > maxD ? maxD / d : 1;
+    state.joyVec.x = (dx * k) / maxD;
+    state.joyVec.y = (dy * k) / maxD;
+  }
+  if (state.lookActive) {
+    const dx = x - state.lookStart.x, dy = y - state.lookStart.y;
+    state.yaw = state.lookStartYaw - dx * 0.005;
+    state.pitch = Math.max(-0.5, Math.min(0.5, state.lookStartPitch - dy * 0.003));
+  }
+});
+canvas.addEventListener('mouseup', () => {
+  mouseDown = false; state.joyActive = false; state.lookActive = false;
+  state.joyVec.x = 0; state.joyVec.y = 0;
+});
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// WASD для десктопа (бонус)
+const keys = {};
+window.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+
+// вставляем в цикл движения проверку клавиш
+const origLoop = loop;
+const wrappedLoop = function(t) {
+  if (keys['w'] || keys['arrowup']) state.joyVec.y = -1, state.joyActive = true;
+  else if (keys['s'] || keys['arrowdown']) state.joyVec.y = 1, state.joyActive = true;
+  else if (!mouseDown) state.joyActive = state.joyActive && (state.joyVec.x || state.joyVec.y);
+  if (keys['a'] || keys['arrowleft']) state.joyVec.x = -1, state.joyActive = true;
+  else if (keys['d'] || keys['arrowright']) state.joyVec.x = 1, state.joyActive = true;
+  origLoop(t);
+};
+
+genBtn.addEventListener('click', generatePlanet);
+generatePlanet();
+requestAnimationFrame(wrappedLoop);
+</script>
 </body>
-</html>
+  </html>
